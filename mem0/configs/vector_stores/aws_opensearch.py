@@ -9,6 +9,8 @@ class AWSOpenSearchConfig(BaseModel):
     use_iam: bool = Field(False, description="Whether to use IAM authentication instead of basic auth")
     embedding_model_dims: int = Field(None, description="Dimension of the embedding vector")
     secret_arn: str = Field(None, description="ARN of the secret in AWS Secrets Manager containing credentials.")
+    username: str = Field(None, description="Username for basic authentication")
+    password: str = Field(None, description="Password for basic authentication")
 
     @model_validator(mode="before")
     @classmethod

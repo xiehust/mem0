@@ -31,6 +31,8 @@ class AWSOpenSearch(VectorStoreBase):
         embedding_model_dims,
         use_iam,
         secret_arn,
+        username: str = None,
+        password: str = None,
     ):
         """
         Initialize AWS OpenSearch client.
@@ -41,6 +43,8 @@ class AWSOpenSearch(VectorStoreBase):
             embedding_model_dims (int): Dimensions of the embedding model.
             use_iam: Whether to use IAM authentication instead of basic auth
             secret_arn: ARN of the secret in AWS Secrets Manager containing credentials
+            username: Master username for basic auth (if not using IAM)
+            password: Master password for basic auth (if not using IAM)
         """
         self.host = host 
         self.region = os.environ.get("AWS_REGION")
@@ -67,9 +71,13 @@ class AWSOpenSearch(VectorStoreBase):
             self.session = boto3.Session(region_name=self.region)
 
         # Retrieve credentials from Secrets Manager
-        secrets = self._get_secret(secret_arn)
-        self.username = secrets.get('username', 'admin')
-        self.password = secrets.get('password')
+        if secret_arn:
+            secrets = self._get_secret(secret_arn)
+            self.username = secrets.get('username', 'admin')
+            self.password = secrets.get('password')
+        else:
+            self.username = username
+            self.password = password
 
         
         if self.use_iam:
