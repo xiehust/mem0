@@ -45,6 +45,7 @@ class EmbedderFactory:
         "gemini": "mem0.embeddings.gemini.GoogleGenAIEmbedding",
         "vertexai": "mem0.embeddings.vertexai.VertexAIEmbedding",
         "together": "mem0.embeddings.together.TogetherEmbedding",
+        "aws_bedrock": "mem0.embeddings.aws_bedrock.AWSBedrockEmbedding",
     }
 
     @classmethod
@@ -66,6 +67,7 @@ class VectorStoreFactory:
         "milvus": "mem0.vector_stores.milvus.MilvusDB",
         "azure_ai_search": "mem0.vector_stores.azure_ai_search.AzureAISearch",
         "redis": "mem0.vector_stores.redis.RedisDB",
+        "aws_opensearch": "mem0.vector_stores.aws_opensearch.AWSOpenSearch"
     }
 
     @classmethod

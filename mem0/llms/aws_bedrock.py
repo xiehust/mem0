@@ -17,36 +17,60 @@ class AWSBedrockLLM(LLMBase):
 
         if not self.config.model:
             self.config.model = "anthropic.claude-3-5-sonnet-20240620-v1:0"
-        self.client = boto3.client(
-            "bedrock-runtime",
-            region_name=os.environ.get("AWS_REGION"),
-            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY"),
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-        )
+
+        self.aws_access_key=os.environ.get("AWS_ACCESS_KEY")
+        self.aws_secret_key=os.environ.get("AWS_SECRET_ACCESS_KEY")
+        self.region = os.environ.get("AWS_REGION")
+
+        if self.aws_access_key and self.aws_secret_key:
+            self.session = boto3.Session(
+                aws_access_key_id=self.aws_access_key,
+                aws_secret_access_key=self.aws_secret_key,
+                region_name=self.region
+            )
+        else:
+            self.session = boto3.Session(region_name=self.region)
+
+        self.client = self.session.client("bedrock-runtime")
+        
         self.model_kwargs = {
             "temperature": self.config.temperature,
-            "max_tokens_to_sample": self.config.max_tokens,
+            "max_tokens": self.config.max_tokens,
             "top_p": self.config.top_p,
         }
 
-    def _format_messages(self, messages: List[Dict[str, str]]) -> str:
+    def _format_messages(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """
-        Formats a list of messages into the required prompt structure for the model.
+        Formats messages and system prompt for the Bedrock Converse API.
 
         Args:
             messages (List[Dict[str, str]]): A list of dictionaries where each dictionary represents a message.
-                                            Each dictionary contains 'role' and 'content' keys.
+                                           Each dictionary contains 'role' and 'content' keys.
 
         Returns:
-            str: A formatted string combining all messages, structured with roles capitalized and separated by newlines.
+            Dict[str, Any]: A dictionary containing formatted messages and system prompt if present.
         """
+        formatted_request = {}
         formatted_messages = []
-        for message in messages:
-            role = message["role"].capitalize()
-            content = message["content"]
-            formatted_messages.append(f"\n\n{role}: {content}")
+        system_content = []
 
-        return "".join(formatted_messages) + "\n\nAssistant:"
+        for message in messages:
+            role = message["role"].lower()
+            content = message["content"]
+
+            if role == "system":
+                system_content.append({"text": content})
+            elif role in ["user", "assistant"]:
+                formatted_messages.append({
+                    "role": role,
+                    "content": [{"text": content}]
+                })
+
+        formatted_request["messages"] = formatted_messages
+        if system_content:
+            formatted_request["system"] = system_content
+
+        return formatted_request
 
     def _parse_response(self, response, tools) -> str:
         """
@@ -63,82 +87,53 @@ class AWSBedrockLLM(LLMBase):
             processed_response = {"tool_calls": []}
 
             if response["output"]["message"]["content"]:
-                for item in response["output"]["message"]["content"]:
-                    if "toolUse" in item:
+                for content_block in response["output"]["message"]["content"]:
+                    if "toolUse" in content_block:
                         processed_response["tool_calls"].append(
                             {
-                                "name": item["toolUse"]["name"],
-                                "arguments": item["toolUse"]["input"],
+                                "name": content_block["toolUse"]["name"],
+                                "arguments": content_block["toolUse"]["input"],
                             }
                         )
 
             return processed_response
 
-        response_body = json.loads(response["body"].read().decode())
-        return response_body.get("completion", "")
+        # For non-tool responses, extract text from content blocks
+        if "output" in response and "message" in response["output"]:
+            message = response["output"]["message"]
+            if "content" in message:
+                text_blocks = [block["text"] for block in message["content"] if "text" in block]
+                return " ".join(text_blocks)
+        return ""
 
-    def _prepare_input(
-        self,
-        provider: str,
-        model: str,
-        prompt: str,
-        model_kwargs: Optional[Dict[str, Any]] = {},
-    ) -> Dict[str, Any]:
+    def _prepare_inference_config(self, model_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Prepares the input dictionary for the specified provider's model by mapping and renaming
-        keys in the input based on the provider's requirements.
+        Prepares the inference configuration for the model.
 
         Args:
-            provider (str): The name of the service provider (e.g., "meta", "ai21", "mistral", "cohere", "amazon").
-            model (str): The name or identifier of the model being used.
-            prompt (str): The text prompt to be processed by the model.
-            model_kwargs (Dict[str, Any]): Additional keyword arguments specific to the model's requirements.
+            model_kwargs (Dict[str, Any]): Model-specific keyword arguments.
 
         Returns:
-            Dict[str, Any]: The prepared input dictionary with the correct keys and values for the specified provider.
+            Dict[str, Any]: The prepared inference configuration.
         """
+        inference_config = {}
+        if "max_tokens" in model_kwargs:
+            inference_config["maxTokens"] = model_kwargs["max_tokens"]
+        if "temperature" in model_kwargs:
+            inference_config["temperature"] = model_kwargs["temperature"]
+        if "top_p" in model_kwargs:
+            inference_config["topP"] = model_kwargs["top_p"]
+        return inference_config
 
-        input_body = {"prompt": prompt, **model_kwargs}
-
-        provider_mappings = {
-            "meta": {"max_tokens_to_sample": "max_gen_len"},
-            "ai21": {"max_tokens_to_sample": "maxTokens", "top_p": "topP"},
-            "mistral": {"max_tokens_to_sample": "max_tokens"},
-            "cohere": {"max_tokens_to_sample": "max_tokens", "top_p": "p"},
-        }
-
-        if provider in provider_mappings:
-            for old_key, new_key in provider_mappings[provider].items():
-                if old_key in input_body:
-                    input_body[new_key] = input_body.pop(old_key)
-
-        if provider == "cohere" and "cohere.command-r" in model:
-            input_body["message"] = input_body.pop("prompt")
-
-        if provider == "amazon":
-            input_body = {
-                "inputText": prompt,
-                "textGenerationConfig": {
-                    "maxTokenCount": model_kwargs.get("max_tokens_to_sample"),
-                    "topP": model_kwargs.get("top_p"),
-                    "temperature": model_kwargs.get("temperature"),
-                },
-            }
-            input_body["textGenerationConfig"] = {
-                k: v for k, v in input_body["textGenerationConfig"].items() if v is not None
-            }
-
-        return input_body
-
-    def _convert_tool_format(self, original_tools):
+    def _convert_tool_format(self, original_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Converts a list of tools from their original format to a new standardized format.
+        Converts a list of tools from their original format to the format required by the Bedrock Converse API.
 
         Args:
-            original_tools (list): A list of dictionaries representing the original tools, each containing a 'type' key and corresponding details.
+            original_tools (List[Dict[str, Any]]): A list of tools in the original format.
 
         Returns:
-            list: A list of dictionaries representing the tools in the new standardized format.
+            List[Dict[str, Any]]: A list of tools in the Bedrock Converse API format.
         """
         new_tools = []
 
@@ -148,7 +143,7 @@ class AWSBedrockLLM(LLMBase):
                 new_tool = {
                     "toolSpec": {
                         "name": function["name"],
-                        "description": function["description"],
+                        "description": function.get("description", ""),
                         "inputSchema": {
                             "json": {
                                 "type": "object",
@@ -181,46 +176,29 @@ class AWSBedrockLLM(LLMBase):
 
         Args:
             messages (list): List of message dicts containing 'role' and 'content'.
-            tools (list, optional): List of tools that the model can call. Defaults to None.
+            response_format: Not used in this implementation.
+            tools (list, optional): List of tools that the model can call.
             tool_choice (str, optional): Tool choice method. Defaults to "auto".
 
         Returns:
             str: The generated response.
         """
+        formatted_request = self._format_messages(messages)
+        request_body = {
+            "modelId": self.config.model,
+            **formatted_request
+        }
 
         if tools:
-            # Use converse method when tools are provided
-            messages = [
-                {
-                    "role": "user",
-                    "content": [{"text": message["content"]} for message in messages],
-                }
-            ]
-            inference_config = {
-                "temperature": self.model_kwargs["temperature"],
-                "maxTokens": self.model_kwargs["max_tokens_to_sample"],
-                "topP": self.model_kwargs["top_p"],
+            tool_config = {
+                "tools": self._convert_tool_format(tools),
+                "toolChoice": {"auto": {}} if tool_choice == "auto" else {"any": {}}
             }
-            tools_config = {"tools": self._convert_tool_format(tools)}
+            request_body["toolConfig"] = tool_config
 
-            response = self.client.converse(
-                modelId=self.config.model,
-                messages=messages,
-                inferenceConfig=inference_config,
-                toolConfig=tools_config,
-            )
-        else:
-            # Use invoke_model method when no tools are provided
-            prompt = self._format_messages(messages)
-            provider = self.model.split(".")[0]
-            input_body = self._prepare_input(provider, self.config.model, prompt, **self.model_kwargs)
-            body = json.dumps(input_body)
+        inference_config = self._prepare_inference_config(self.model_kwargs)
+        if inference_config:
+            request_body["inferenceConfig"] = inference_config
 
-            response = self.client.invoke_model(
-                body=body,
-                modelId=self.model,
-                accept="application/json",
-                contentType="application/json",
-            )
-
+        response = self.client.converse(**request_body)
         return self._parse_response(response, tools)
